@@ -82,7 +82,6 @@ while true; do
         fi
         
         echo "Enter allowed hostnames using FQDN (e.g., myserver.umich.edu,server2.umich.edu)"
-        echo "   Tip: Run 'hostname -f' on target systems to verify the exact hostname format"
         echo -n "> "
         read ALLOWED_HOSTS
         if [[ -z "$ALLOWED_HOSTS" ]]; then

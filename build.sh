@@ -65,6 +65,10 @@ fi
 ALLOWED_HOSTS=""
 DNS_SERVER=""
 
+echo ""
+echo "Note: Hostname lock requires exact matching. Use FQDN (e.g., myserver.umich.edu)."
+echo "      Run 'hostname -f' on target systems to verify the format they will report."
+
 while true; do
     echo -n "Enable hostname lock? (Y/n): "
     read ENABLE_HOST_LOCK
@@ -77,7 +81,9 @@ while true; do
             exit 1
         fi
         
-        echo -n "Enter allowed hostnames, comma-separated (e.g., server1.example.com,server2.example.com): "
+        echo "Enter allowed hostnames using FQDN (e.g., myserver.umich.edu,server2.umich.edu)"
+        echo "   Tip: Run 'hostname -f' on target systems to verify the exact hostname format"
+        echo -n "> "
         read ALLOWED_HOSTS
         if [[ -z "$ALLOWED_HOSTS" ]]; then
             echo "Error: allowed hostnames cannot be empty when hostname lock is enabled"

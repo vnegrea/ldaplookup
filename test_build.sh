@@ -56,6 +56,15 @@ check_test_value "$TEST_PASSWORD" "TEST_PASSWORD"
 echo "Safety checks passed."
 echo ""
 
+# Back up existing seed if present (protect production seeds)
+SEED_BACKED_UP=false
+if [[ -f ".garble_seed" ]]; then
+    cp .garble_seed .garble_seed.backup
+    SEED_BACKED_UP=true
+    trap 'if [[ "$SEED_BACKED_UP" == "true" ]]; then mv .garble_seed.backup .garble_seed 2>/dev/null; fi' EXIT
+    echo "Note: Existing .garble_seed backed up (will be restored after test)"
+fi
+
 # Clean up any previous test artifacts
 rm -f ldaplookup ldaplookupg .garble_seed
 
@@ -127,9 +136,12 @@ echo ""
 echo "=== All Tests PASSED ==="
 echo ""
 
-# Clean up test artifacts
+# Clean up test artifacts (trap will restore original seed on exit)
 echo "Cleaning up test artifacts..."
 rm -f ldaplookup ldaplookupg .garble_seed
 echo "Removed: ldaplookup, ldaplookupg, .garble_seed"
+if [[ "$SEED_BACKED_UP" == "true" ]]; then
+    echo "Restoring original .garble_seed..."
+fi
 
 exit 0

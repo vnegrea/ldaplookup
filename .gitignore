@@ -1,0 +1,17 @@
+# Built binary
+ldaplookup
+ldaplookupg
+
+# Garble seed (sensitive)
+.garble_seed
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# GitHub config
+.github/

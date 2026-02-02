@@ -58,6 +58,12 @@ The build uses flags from garble, Go's build system, the Go linker, and environm
 
 Using a DNS server you control is critical. It prevents attackers from spoofing hostname resolution on a compromised system. If verification fails, [tamper protection](#tamper-protection) is triggered.
 
+**Important:** Hostname matching is exact. Use the **FQDN** (e.g., `myserver.umich.edu`) not just the short name.
+
+To check what your system will return, run: `hostname -f`
+
+You can provide multiple hostnames (comma-separated) if needed, or include both FQDN and short name variants: `myserver.umich.edu,myserver`
+
 **Path lock:** Restricts execution to a specific deployment directory.
 1. At build time, specify the allowed deployment path (e.g., `/opt/ldaplookup`)
 2. At runtime, the binary verifies its executable path matches the allowed location

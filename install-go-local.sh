@@ -16,14 +16,16 @@ tar -xzf "$GO_TARBALL" -C "$GO_HOME/go-sdk" --strip-components=1
 rm "$GO_TARBALL"
 
 # Create env file with duplicate guard
-echo 'export GOPATH="$HOME/myGo/go"' > "$GO_HOME/env.sh"
+echo 'export GOROOT="$HOME/myGo/go-sdk"' > "$GO_HOME/env.sh"
+echo 'export GOPATH="$HOME/myGo/go"' >> "$GO_HOME/env.sh"
 echo 'if [[ ":$PATH:" != *":$HOME/myGo/go-sdk/bin:"* ]]; then' >> "$GO_HOME/env.sh"
-echo '    export PATH="$HOME/myGo/go-sdk/bin:$GOPATH/bin:$PATH"' >> "$GO_HOME/env.sh"
+echo '    export PATH="$GOROOT/bin:$GOPATH/bin:$PATH"' >> "$GO_HOME/env.sh"
 echo 'fi' >> "$GO_HOME/env.sh"
 
 # Install garble using the new paths
+export GOROOT="$GO_HOME/go-sdk"
 export GOPATH="$GO_HOME/go"
-export PATH="$GO_HOME/go-sdk/bin:$GOPATH/bin:$PATH"
+export PATH="$GOROOT/bin:$GOPATH/bin:$PATH"
 go install mvdan.cc/garble@latest
 
 echo ""

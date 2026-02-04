@@ -91,7 +91,7 @@ You'll be prompted for:
 - LDAP server URL (e.g., `ldaps://ldap.umich.edu`)
 - User search base (e.g., `ou=People,dc=umich,dc=edu`)
 - Group search base (e.g., `ou=User Groups,ou=Groups,dc=umich,dc=edu`)
-- Bind DN
+- Bind DN (full Distinguished Name, e.g., `cn=App01,ou=Applications,o=services` — not just `cn=App01`)
 - Bind password
 - Hostname lock (enabled by default)
 - Path lock (enabled by default)
@@ -180,3 +180,18 @@ The seed is stored in `.garble_seed` (gitignored) and reused on subsequent build
 - Go 1.21+
 - [garble](https://github.com/burrowers/garble): `go install mvdan.cc/garble@latest`
 - openssl (for seed generation)
+
+### Installing Go in Your Home Directory (Linux)
+
+**Note:** If you already have Go installed and configured (`go version` works), skip this section and just run `go install mvdan.cc/garble@latest`.
+
+If Go is not available system-wide and you prefer not to install it globally, use the included helper script:
+
+```bash
+./install-go-local.sh      # Downloads and installs Go + garble
+source ~/myGo/env.sh       # Activate in current terminal
+./test_build.sh            # Verify build works
+./build.sh                 # Build with real credentials
+```
+
+The script installs to `~/myGo/` and creates an environment file. To make permanent, add `source ~/myGo/env.sh` to your `~/.bashrc`.

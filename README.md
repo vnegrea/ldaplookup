@@ -82,7 +82,7 @@ Built-in tamper resistance protects against analysis and unauthorized use. When 
 
 ## 📦 Installing Go Locally (Linux)
 
-**Note:** If you already have Go installed and configured (`go version` works), skip this section and just run `go install mvdan.cc/garble@latest`.
+**Note:** If you already have Go installed and configured (`go version` works), skip this section. The build scripts will install garble automatically.
 
 If Go is not available system-wide and you prefer not to install it globally, use the included helper script:
 

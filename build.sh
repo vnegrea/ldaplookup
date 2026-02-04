@@ -1,11 +1,16 @@
 #!/bin/bash
 set -e
 
-GARBLE="${HOME}/go/bin/garble"
-
-if [[ ! -x "$GARBLE" ]]; then
+if ! command -v garble &>/dev/null; then
     echo "garble not found. Installing..."
     go install mvdan.cc/garble@latest
+fi
+
+GARBLE="$(command -v garble)"
+if [[ -z "$GARBLE" ]]; then
+    echo "Error: garble not found in PATH after install"
+    echo "Make sure Go bin directory is in your PATH"
+    exit 1
 fi
 
 # Security disclaimer

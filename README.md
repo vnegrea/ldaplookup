@@ -183,7 +183,9 @@ The seed is stored in `.garble_seed` (gitignored) and reused on subsequent build
 
 ### Installing Go in Your Home Directory (Linux)
 
-If Go is not available system-wide, use the included helper script:
+**Note:** If you already have Go installed and configured (`go version` works), skip this section and just run `go install mvdan.cc/garble@latest`.
+
+If Go is not available system-wide and you prefer not to install it globally, use the included helper script:
 
 ```bash
 ./install-go-local.sh      # Downloads and installs Go + garble

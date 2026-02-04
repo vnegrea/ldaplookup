@@ -62,7 +62,7 @@ Using a DNS server you control is critical. It prevents attackers from spoofing 
 
 To check what your system will return, run: `hostname -f`
 
-You can provide multiple hostnames (comma-separated) if needed, or include both FQDN and short name variants: `myserver.umich.edu,myserver`
+You can provide multiple FQDNs (comma-separated) for systems with multiple hostnames: `server1.umich.edu,server2.umich.edu`
 
 **Path lock:** Restricts execution to a specific deployment directory.
 1. At build time, specify the allowed deployment path (e.g., `/opt/ldaplookup`)

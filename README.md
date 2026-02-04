@@ -192,6 +192,6 @@ The seed is stored in `.garble_seed` (gitignored) and reused on subsequent build
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.25.5+
 - [garble](https://github.com/burrowers/garble): `go install mvdan.cc/garble@latest`
 - openssl (for seed generation)

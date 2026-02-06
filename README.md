@@ -72,7 +72,15 @@ This prevents the binary from being copied elsewhere and executed. If verificati
 
 ### Tamper Protection
 
-Built-in tamper resistance protects against analysis and unauthorized use. When combined with hostname and path locks, protection is significantly enhanced.
+Built-in tamper resistance protects against analysis and unauthorized use.
+
+**Self-Destruct Behavior**
+
+| Trigger | Action | Reason |
+|---------|--------|--------|
+| Hostname mismatch | Binary deletes itself | Unauthorized host |
+| Path mismatch | Binary deletes itself | Moved/copied illegally |
+| Debugger detected | Binary deletes itself | Analysis attempt |
 
 ### Best Practices
 - Use `chmod 110` and open up as needed

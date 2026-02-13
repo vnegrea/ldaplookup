@@ -3,6 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -11,9 +15,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
+	"golang.org/x/term"
 )
 
 // Build-time configuration (set via -ldflags)
@@ -22,11 +28,12 @@ var (
 	bindDN          string
 	userSearchBase  string
 	groupSearchBase string
-	bindPWEnc       string // XOR encoded
-	obfKey          string // XOR key
+	bindPWEnc       string // XOR encoded (legacy, kept for compatibility)
+	obfKey          string // XOR key (legacy, kept for compatibility)
 	dnsServer       string // optional: hostname lock DNS server
 	allowedHostsEnc string // optional: XOR encoded
 	allowedPathEnc  string // optional: XOR encoded
+	envSalt         string // salt for environment-derived key
 )
 
 // xorDecode decodes a hex-encoded XOR string
@@ -55,6 +62,153 @@ var validGroupAttrs = map[string]bool{
 	"cn":        true,
 	"gidNumber": true,
 	"memberUid": true,
+}
+
+// deriveKeyFromEnvironment creates an AES key from machine-specific values
+// This key cannot be derived by static analysis tools like Ungarble
+func deriveKeyFromEnvironment() ([]byte, error) {
+	h := sha256.New()
+
+	// 1. Machine ID (unique per Linux install)
+	mid, err := os.ReadFile("/etc/machine-id")
+	if err != nil {
+		return nil, fmt.Errorf("cannot read machine-id: %w", err)
+	}
+	h.Write(mid)
+
+	// 2. Build-time salt (prevents rainbow tables)
+	if envSalt != "" {
+		h.Write([]byte(envSalt))
+	}
+
+	// 3. Deployment path (changes if binary is copied elsewhere)
+	exePath, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("cannot get executable path: %w", err)
+	}
+	exePath, _ = filepath.EvalSymlinks(exePath)
+	h.Write([]byte(filepath.Dir(exePath)))
+
+	return h.Sum(nil), nil
+}
+
+// getSealPath returns the path to the .seal file
+func getSealPath() (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	exePath, _ = filepath.EvalSymlinks(exePath)
+	return exePath + ".seal", nil
+}
+
+// sealCredentials encrypts and stores the LDAP password
+func sealCredentials() error {
+	fmt.Print("Enter LDAP password to seal: ")
+	password, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println()
+	if err != nil {
+		return fmt.Errorf("failed to read password: %w", err)
+	}
+
+	if len(password) == 0 {
+		return fmt.Errorf("password cannot be empty")
+	}
+
+	key, err := deriveKeyFromEnvironment()
+	if err != nil {
+		return fmt.Errorf("key derivation failed: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("cipher creation failed: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("GCM creation failed: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return fmt.Errorf("nonce generation failed: %w", err)
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, password, nil)
+
+	sealPath, err := getSealPath()
+	if err != nil {
+		return fmt.Errorf("cannot determine seal path: %w", err)
+	}
+
+	if err := os.WriteFile(sealPath, ciphertext, 0400); err != nil {
+		return fmt.Errorf("failed to write seal file: %w", err)
+	}
+
+	fmt.Printf("Credentials sealed to %s\n", sealPath)
+	fmt.Println("This file is bound to this machine and deployment path.")
+	return nil
+}
+
+// unsealPassword decrypts the stored password using environment-derived key
+func unsealPassword() (string, error) {
+	sealPath, err := getSealPath()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine seal path: %w", err)
+	}
+
+	ciphertext, err := os.ReadFile(sealPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("no sealed credentials found - run with --seal first")
+		}
+		return "", fmt.Errorf("failed to read seal file: %w", err)
+	}
+
+	key, err := deriveKeyFromEnvironment()
+	if err != nil {
+		return "", fmt.Errorf("key derivation failed: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", fmt.Errorf("cipher creation failed: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", fmt.Errorf("GCM creation failed: %w", err)
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return "", fmt.Errorf("invalid seal file")
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", fmt.Errorf("unseal failed - wrong environment or tampered file")
+	}
+
+	return string(plaintext), nil
+}
+
+// getBindPassword returns the LDAP bind password using sealed credentials or legacy XOR
+func getBindPassword() (string, error) {
+	// Try sealed credentials first (new method)
+	sealPath, _ := getSealPath()
+	if _, err := os.Stat(sealPath); err == nil {
+		return unsealPassword()
+	}
+
+	// Fall back to legacy XOR-encoded password (for backward compatibility)
+	if bindPWEnc != "" && obfKey != "" {
+		return xorDecode(bindPWEnc, obfKey), nil
+	}
+
+	return "", fmt.Errorf("no credentials available - run with --seal or rebuild with embedded credentials")
 }
 
 // selfDestruct deletes both binaries and exits
@@ -175,6 +329,20 @@ func checkDebugger() bool {
 }
 
 func main() {
+	// Handle --seal mode first (before any security checks)
+	if len(os.Args) >= 2 && os.Args[1] == "--seal" {
+		if ldapServer == "" {
+			fmt.Fprintf(os.Stderr, "Error: binary was not built with required values.\n")
+			fmt.Fprintf(os.Stderr, "Use build.sh to create a properly configured binary.\n")
+			os.Exit(1)
+		}
+		if err := sealCredentials(); err != nil {
+			fmt.Fprintf(os.Stderr, "Seal error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if checkDebugger() {
 		hostLockConfigured := dnsServer != "" && allowedHostsEnc != ""
 		pathLockConfigured := allowedPathEnc != ""
@@ -192,7 +360,12 @@ func main() {
 		selfDestruct()
 	}
 
-	bindPW := xorDecode(bindPWEnc, obfKey)
+	bindPW, err := getBindPassword()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	if ldapServer == "" || bindDN == "" || userSearchBase == "" || groupSearchBase == "" || bindPW == "" {
 		fmt.Fprintf(os.Stderr, "Error: binary was not built with required values.\n")
 		fmt.Fprintf(os.Stderr, "Use build.sh to create a properly configured binary.\n")

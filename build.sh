@@ -58,12 +58,41 @@ if [[ -z "$BIND_DN" ]]; then
     exit 1
 fi
 
-echo -n "Enter bind password: "
-read -s LDAP_PASSWORD
+# Credential mode selection
 echo ""
-if [[ -z "$LDAP_PASSWORD" ]]; then
-    echo "Error: password cannot be empty"
-    exit 1
+echo "🔐 Credential Protection Mode"
+echo ""
+echo "  [1] Sealed credentials (RECOMMENDED)"
+echo "      - Password NOT embedded in binary"
+echo "      - Encrypted on target machine with environment-derived key"
+echo "      - Resists static analysis tools like Ungarble"
+echo "      - Requires running --seal on target after deployment"
+echo ""
+echo "  [2] Legacy embedded credentials"
+echo "      - Password XOR-encoded in binary (garble-obfuscated)"
+echo "      - Vulnerable to static analysis/emulation attacks"
+echo "      - No post-deployment setup required"
+echo ""
+echo -n "Select mode (1/2) [1]: "
+read CRED_MODE
+CRED_MODE=${CRED_MODE:-1}
+
+LDAP_PASSWORD=""
+USE_SEALED_CREDS="false"
+
+if [[ "$CRED_MODE" == "1" ]]; then
+    USE_SEALED_CREDS="true"
+    echo ""
+    echo "Sealed credentials mode selected."
+    echo "After deployment, run: ./ldaplookup --seal"
+else
+    echo -n "Enter bind password: "
+    read -s LDAP_PASSWORD
+    echo ""
+    if [[ -z "$LDAP_PASSWORD" ]]; then
+        echo "Error: password cannot be empty"
+        exit 1
+    fi
 fi
 
 # Hostname lock configuration
@@ -172,20 +201,42 @@ xor_encode() {
 # Generate random key for obfuscation
 OBF_KEY=$(openssl rand -hex 16)
 
+# Generate environment salt for sealed credentials
+ENV_SALT=$(openssl rand -hex 16)
+
 # Obfuscate sensitive values
-OBF_PASSWORD=$(xor_encode "$LDAP_PASSWORD" "$OBF_KEY")
+OBF_PASSWORD=""
+if [[ "$USE_SEALED_CREDS" != "true" && -n "$LDAP_PASSWORD" ]]; then
+    OBF_PASSWORD=$(xor_encode "$LDAP_PASSWORD" "$OBF_KEY")
+fi
 OBF_HOSTS=$(xor_encode "$ALLOWED_HOSTS" "$OBF_KEY")
 OBF_PATH=$(xor_encode "$ALLOWED_PATH" "$OBF_KEY")
 
 export GOGARBLE='*'
 CGO_ENABLED=0 "$GARBLE" -literals -tiny -seed="$SEED" build \
   -trimpath \
-  -ldflags="-s -w -buildid= -X 'main.ldapServer=${LDAP_SERVER}' -X 'main.bindDN=${BIND_DN}' -X 'main.userSearchBase=${USER_SEARCH_BASE}' -X 'main.groupSearchBase=${GROUP_SEARCH_BASE}' -X 'main.bindPWEnc=${OBF_PASSWORD}' -X 'main.obfKey=${OBF_KEY}' -X 'main.dnsServer=${DNS_SERVER}' -X 'main.allowedHostsEnc=${OBF_HOSTS}' -X 'main.allowedPathEnc=${OBF_PATH}'" \
+  -ldflags="-s -w -buildid= -X 'main.ldapServer=${LDAP_SERVER}' -X 'main.bindDN=${BIND_DN}' -X 'main.userSearchBase=${USER_SEARCH_BASE}' -X 'main.groupSearchBase=${GROUP_SEARCH_BASE}' -X 'main.bindPWEnc=${OBF_PASSWORD}' -X 'main.obfKey=${OBF_KEY}' -X 'main.dnsServer=${DNS_SERVER}' -X 'main.allowedHostsEnc=${OBF_HOSTS}' -X 'main.allowedPathEnc=${OBF_PATH}' -X 'main.envSalt=${ENV_SALT}'" \
   -o ldaplookup .
 
 ln -sf ldaplookup ldaplookupg
 
-unset LDAP_SERVER BIND_DN USER_SEARCH_BASE GROUP_SEARCH_BASE LDAP_PASSWORD DNS_SERVER ALLOWED_HOSTS ALLOWED_PATH OBF_KEY OBF_PASSWORD OBF_HOSTS OBF_PATH
+unset LDAP_SERVER BIND_DN USER_SEARCH_BASE GROUP_SEARCH_BASE LDAP_PASSWORD DNS_SERVER ALLOWED_HOSTS ALLOWED_PATH OBF_KEY OBF_PASSWORD OBF_HOSTS OBF_PATH ENV_SALT
 
 echo ""
 echo "Done! Binaries created: ./ldaplookup (users) and ./ldaplookupg (groups)"
+
+if [[ "$USE_SEALED_CREDS" == "true" ]]; then
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│  SEALED CREDENTIALS MODE                                        │"
+    echo "│                                                                 │"
+    echo "│  The password is NOT embedded in this binary.                   │"
+    echo "│  After deploying to the target machine, run:                    │"
+    echo "│                                                                 │"
+    echo "│    ./ldaplookup --seal                                          │"
+    echo "│                                                                 │"
+    echo "│  This will prompt for the password and encrypt it using         │"
+    echo "│  environment-derived keys (machine-id + deployment path).       │"
+    echo "│  The sealed credentials cannot be used on any other machine.    │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+fi

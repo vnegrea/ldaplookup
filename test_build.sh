@@ -69,14 +69,15 @@ fi
 rm -f ldaplookup ldaplookupg .garble_seed
 
 # Feed test inputs to build.sh
-# Order: disclaimer, url, user_base, group_base, bind_dn, password,
-#        hostname_lock(n), confirm_no_host(y), path_lock(n), confirm_no_path(y), new_seed(y)
+# Order: disclaimer, url, user_base, group_base, bind_dn, cred_mode(2=legacy),
+#        password, hostname_lock(n), confirm_no_host(y), path_lock(n), confirm_no_path(y), new_seed(y)
 cat <<EOF | ./build.sh
 yes
 ${TEST_URL}
 ${TEST_USER_BASE}
 ${TEST_GROUP_BASE}
 ${TEST_BIND_DN}
+2
 ${TEST_PASSWORD}
 n
 y

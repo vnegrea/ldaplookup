@@ -50,6 +50,34 @@ The build uses flags from garble, Go's build system, the Go linker, and environm
 | `-buildid=` | go linker | Remove Go build ID to hinder version fingerprinting |
 | `GOGARBLE='*'` | env var | Obfuscate all packages including dependencies |
 
+### Sealed Credentials (Recommended)
+
+By default, the build process uses **sealed credentials** which provide stronger protection against static analysis and binary emulation attacks.
+
+**How it works:**
+1. The password is **not embedded** in the binary at build time
+2. After deployment, you run `./ldaplookup --seal` on the target machine
+3. The password is encrypted using AES-GCM with a key derived from:
+   - `/etc/machine-id` (unique to each Linux installation)
+   - Build-time salt (prevents rainbow table attacks)
+   - Deployment path (binary's directory location)
+4. The encrypted credentials are stored in a `.seal` file alongside the binary
+
+**Why this defeats static analysis:**
+
+| Attack | Legacy XOR | Sealed Credentials |
+|--------|------------|-------------------|
+| Extract key from binary | ✅ Possible | ❌ Key doesn't exist in binary |
+| Emulate decryption | ✅ Recovers password | ❌ Requires target's machine-id |
+| Copy binary to analyst VM | ✅ Still works | ❌ Wrong machine-id = decryption fails |
+| Copy binary + .seal file | ✅ N/A | ❌ Wrong machine-id = decryption fails |
+
+**Limitations:**
+- Requires post-deployment setup (`--seal` step)
+- The `.seal` file must be protected and deployed alongside the binary
+
+**Legacy mode:** If post-deployment setup isn't feasible, the build script offers a legacy mode with XOR-encoded credentials embedded in the binary. This is less secure but requires no setup after deployment.
+
 ### Runtime Locks
 
 **Hostname lock:** Restricts execution to specific servers using DNS verification.
@@ -140,9 +168,15 @@ cp ldaplookup /path/to/destination/
 
 # Create the symlink for group lookups
 ln -s ldaplookup /path/to/destination/ldaplookupg
+
+# If using sealed credentials (default), seal on the target machine
+/path/to/destination/ldaplookup --seal
+# Enter the LDAP password when prompted
 ```
 
 The binary detects its invocation name. When called as `ldaplookupg`, it queries groups instead of users.
+
+**Note:** If you used legacy embedded credentials during build, the `--seal` step is not required.
 
 ### Obfuscation Seed
 

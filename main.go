@@ -104,6 +104,31 @@ func getSealPath() (string, error) {
 
 // sealCredentials encrypts and stores the LDAP password
 func sealCredentials() error {
+	sealPath, err := getSealPath()
+	if err != nil {
+		return fmt.Errorf("cannot determine seal path: %w", err)
+	}
+
+	// Check if seal file already exists
+	if _, err := os.Stat(sealPath); err == nil {
+		fmt.Printf("Existing seal file found: %s\n", sealPath)
+		fmt.Print("Overwrite with new credentials? (y/N): ")
+
+		reader := bufio.NewReader(os.Stdin)
+		response, _ := reader.ReadString('\n')
+		response = strings.TrimSpace(strings.ToLower(response))
+
+		if response != "y" && response != "yes" {
+			fmt.Println("Aborted.")
+			return nil
+		}
+
+		// Remove old file (handles read-only permission)
+		if err := os.Remove(sealPath); err != nil {
+			return fmt.Errorf("failed to remove old seal file: %w", err)
+		}
+	}
+
 	fmt.Print("Enter LDAP password to seal: ")
 	password, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Println()
@@ -136,11 +161,6 @@ func sealCredentials() error {
 	}
 
 	ciphertext := gcm.Seal(nonce, nonce, password, nil)
-
-	sealPath, err := getSealPath()
-	if err != nil {
-		return fmt.Errorf("cannot determine seal path: %w", err)
-	}
 
 	if err := os.WriteFile(sealPath, ciphertext, 0400); err != nil {
 		return fmt.Errorf("failed to write seal file: %w", err)

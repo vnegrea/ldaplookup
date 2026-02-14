@@ -52,31 +52,41 @@ The build uses flags from garble, Go's build system, the Go linker, and environm
 
 ### Sealed Credentials (Recommended)
 
-By default, the build process uses **sealed credentials** which provide stronger protection against static analysis and binary emulation attacks.
+Sealed credentials protect against binary analysis by keeping the password **out of the binary entirely**.
 
 **How it works:**
-1. The password is **not embedded** in the binary at build time
-2. After deployment, you run `./ldaplookup --seal` on the target machine
-3. The password is encrypted using AES-GCM with a key derived from:
-   - `/etc/machine-id` (unique to each Linux installation)
-   - Build-time salt (prevents rainbow table attacks)
-   - Deployment path (binary's directory location)
-4. The encrypted credentials are stored in a `.seal` file alongside the binary
 
-**Why this defeats static analysis:**
+```
+┌─────────────┐        ┌─────────────┐        ┌─────────────┐
+│   BUILD     │        │   DEPLOY    │        │    SEAL     │
+│ No password │  ───►  │ Copy binary │  ───►  │  --seal     │
+│  embedded   │        │  to target  │        │ encrypts pw │
+└─────────────┘        └─────────────┘        └──────┬──────┘
+                                                     │
+                                                     ▼
+                                              ┌─────────────┐
+                                              │ .seal file  │
+                                              │ AES-256-GCM │
+                                              │machine-bound│
+                                              └─────────────┘
+```
 
-| Attack | Legacy XOR | Sealed Credentials |
-|--------|------------|-------------------|
-| Extract key from binary | ✅ Possible | ❌ Key doesn't exist in binary |
-| Emulate decryption | ✅ Recovers password | ❌ Requires target's machine-id |
-| Copy binary to analyst VM | ✅ Still works | ❌ Wrong machine-id = decryption fails |
-| Copy binary + .seal file | ✅ N/A | ❌ Wrong machine-id = decryption fails |
+The password is encrypted using a key derived from:
+- The target machine's unique ID (`/etc/machine-id`)
+- A random salt generated at build time
+- The deployment directory path
 
-**Limitations:**
-- Requires post-deployment setup (`--seal` step)
-- The `.seal` file must be protected and deployed alongside the binary
+**This means:**
+- The binary contains no extractable password
+- The `.seal` file is useless on any other machine
+- Moving or copying the binary breaks decryption
 
-**Legacy mode:** If post-deployment setup isn't feasible, the build script offers a legacy mode with XOR-encoded credentials embedded in the binary. This is less secure but requires no setup after deployment.
+**Credential rotation:**
+```bash
+./ldaplookup --seal    # Prompts to overwrite if .seal exists
+```
+
+**Legacy mode:** If post-deployment setup isn't feasible, select option 2 during build to embed credentials directly (less secure, no setup required).
 
 ### Runtime Locks
 

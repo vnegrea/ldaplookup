@@ -231,16 +231,27 @@ func getBindPassword() (string, error) {
 	return "", fmt.Errorf("no credentials available - run with --seal or rebuild with embedded credentials")
 }
 
-// selfDestruct deletes both binaries and exits
-func selfDestruct() {
+// secureExit removes the running binary and any symlinks to it, then exits.
+func secureExit() {
 	execPath, err := os.Executable()
 	if err == nil {
+		execPath, _ = filepath.EvalSymlinks(execPath)
 		dir := filepath.Dir(execPath)
-		os.Remove(filepath.Join(dir, "ldaplookup"))
-		os.Remove(filepath.Join(dir, "ldaplookupg"))
+
+		// Remove symlinks in the same directory that point to this binary
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			full := filepath.Join(dir, e.Name())
+			if target, err := os.Readlink(full); err == nil {
+				abs, _ := filepath.Abs(filepath.Join(dir, target))
+				if abs == execPath {
+					os.Remove(full)
+				}
+			}
+		}
+
+		os.Remove(execPath)
 	}
-	os.Remove("ldaplookup")
-	os.Remove("ldaplookupg")
 	os.Exit(1)
 }
 
@@ -326,14 +337,14 @@ func checkPathLock() bool {
 	return execDir == normalizedAllowed
 }
 
-// checkDebugger detects if process is being traced
-func checkDebugger() bool {
+// checkTracerPid checks /proc/self/status for a non-zero TracerPid
+func checkTracerPid() bool {
 	file, err := os.Open("/proc/self/status")
 	if err != nil {
 		return false
 	}
 	defer file.Close()
-	
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -345,6 +356,34 @@ func checkDebugger() bool {
 			break
 		}
 	}
+	return false
+}
+
+// checkDebugger uses multiple heuristics to detect debugging.
+// These are defense-in-depth speed bumps, not cryptographic guarantees.
+func checkDebugger() bool {
+	// Method 1: TracerPid — catches ptrace-based debuggers (gdb, strace)
+	if checkTracerPid() {
+		return true
+	}
+
+	// Method 2: PTRACE_TRACEME — fails if already being traced
+	_, _, errno := syscall.RawSyscall(syscall.SYS_PTRACE, 0, 0, 0)
+	if errno != 0 {
+		return true
+	}
+
+	// Method 3: Timing — single-stepping causes measurable delay
+	start := time.Now()
+	sum := 0
+	for i := 0; i < 1000; i++ {
+		sum += i
+	}
+	_ = sum
+	if time.Since(start) > 50*time.Millisecond {
+		return true
+	}
+
 	return false
 }
 
@@ -364,20 +403,11 @@ func main() {
 	}
 
 	if checkDebugger() {
-		hostLockConfigured := dnsServer != "" && allowedHostsEnc != ""
-		pathLockConfigured := allowedPathEnc != ""
-
-		anyLockConfigured := hostLockConfigured || pathLockConfigured
-		allLocksPassed := checkHostnameLock() && checkPathLock()
-
-		if anyLockConfigured && allLocksPassed {
-			os.Exit(1)
-		}
-		selfDestruct()
+		secureExit()
 	}
 
 	if !checkHostnameLock() || !checkPathLock() {
-		selfDestruct()
+		secureExit()
 	}
 
 	bindPW, err := getBindPassword()

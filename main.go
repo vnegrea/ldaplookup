@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
@@ -29,10 +29,12 @@ var (
 	allowedPathEnc  string // optional: XOR encoded
 )
 
-// xorDecode decodes a hex-encoded XOR string
-func xorDecode(hexStr, key string) string {
+// xorDecode decodes a hex-encoded XOR string into a byte slice.
+// Returning []byte (instead of string) lets the password call site zero
+// the buffer after use; config callers convert back with string(...).
+func xorDecode(hexStr, key string) []byte {
 	if hexStr == "" || key == "" {
-		return ""
+		return nil
 	}
 	result := make([]byte, len(hexStr)/2)
 	for i := 0; i < len(hexStr); i += 2 {
@@ -40,7 +42,7 @@ func xorDecode(hexStr, key string) string {
 		fmt.Sscanf(hexStr[i:i+2], "%02x", &b)
 		result[i/2] = b ^ key[i/2%len(key)]
 	}
-	return string(result)
+	return result
 }
 
 var validUserAttrs = map[string]bool{
@@ -57,46 +59,57 @@ var validGroupAttrs = map[string]bool{
 	"memberUid": true,
 }
 
-// selfDestruct deletes both binaries and exits
-func selfDestruct() {
+// secureExit removes the running binary and any symlinks to it, then exits.
+// Resolves the actual executable path (via EvalSymlinks) instead of relying
+// on hardcoded filenames, and only deletes symlinks in the same directory
+// whose target is this binary.
+func secureExit() {
 	execPath, err := os.Executable()
 	if err == nil {
+		execPath, _ = filepath.EvalSymlinks(execPath)
 		dir := filepath.Dir(execPath)
-		os.Remove(filepath.Join(dir, "ldaplookup"))
-		os.Remove(filepath.Join(dir, "ldaplookupg"))
+
+		// Remove symlinks in the same directory that point to this binary
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			full := filepath.Join(dir, e.Name())
+			if target, err := os.Readlink(full); err == nil {
+				abs, _ := filepath.Abs(filepath.Join(dir, target))
+				if abs == execPath {
+					os.Remove(full)
+				}
+			}
+		}
+
+		os.Remove(execPath)
 	}
-	os.Remove("ldaplookup")
-	os.Remove("ldaplookupg")
 	os.Exit(1)
 }
 
-// getHostnameFQDN returns the fully qualified domain name
+// getHostnameFQDN returns the fully qualified domain name using stdlib only.
+// Avoids shelling to hostname/hostnamectl, which would expose us to PATH
+// hijacking on hosts where $PATH is attacker-controlled.
 func getHostnameFQDN() string {
-	// Try hostname -f first
-	if out, err := exec.Command("hostname", "-f").Output(); err == nil {
-		fqdn := strings.TrimSpace(string(out))
-		// If not localhost, use it
-		if fqdn != "" && !strings.HasPrefix(fqdn, "localhost") {
-			return fqdn
-		}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
 	}
 
-	// Try transient hostname (RHEL/systemd)
-	if out, err := exec.Command("hostnamectl", "--transient").Output(); err == nil {
-		transient := strings.TrimSpace(string(out))
-		if transient != "" {
-			return transient
+	// Forward+reverse DNS to promote a short name to an FQDN
+	if addrs, err := net.LookupHost(hostname); err == nil && len(addrs) > 0 {
+		if names, err := net.LookupAddr(addrs[0]); err == nil && len(names) > 0 {
+			fqdn := strings.TrimSuffix(names[0], ".")
+			if fqdn != "" && !strings.HasPrefix(fqdn, "localhost") {
+				return fqdn
+			}
 		}
 	}
-
-	// Fallback to os.Hostname
-	hostname, _ := os.Hostname()
 	return hostname
 }
 
 // checkHostnameLock validates hostname against allowed list and DNS
 func checkHostnameLock() bool {
-	allowedHosts := xorDecode(allowedHostsEnc, obfKey)
+	allowedHosts := string(xorDecode(allowedHostsEnc, obfKey))
 	if dnsServer == "" || allowedHosts == "" {
 		return true
 	}
@@ -133,7 +146,7 @@ func checkHostnameLock() bool {
 
 // checkPathLock validates binary is running from allowed directory
 func checkPathLock() bool {
-	allowedPath := xorDecode(allowedPathEnc, obfKey)
+	allowedPath := string(xorDecode(allowedPathEnc, obfKey))
 	if allowedPath == "" {
 		return true
 	}
@@ -152,14 +165,14 @@ func checkPathLock() bool {
 	return execDir == normalizedAllowed
 }
 
-// checkDebugger detects if process is being traced
-func checkDebugger() bool {
+// checkTracerPid checks /proc/self/status for a non-zero TracerPid
+func checkTracerPid() bool {
 	file, err := os.Open("/proc/self/status")
 	if err != nil {
 		return false
 	}
 	defer file.Close()
-	
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -174,26 +187,45 @@ func checkDebugger() bool {
 	return false
 }
 
+// checkDebugger uses multiple heuristics to detect debugging.
+// These are defense-in-depth speed bumps, not cryptographic guarantees.
+func checkDebugger() bool {
+	// Method 1: TracerPid — catches ptrace-based debuggers (gdb, strace)
+	if checkTracerPid() {
+		return true
+	}
+
+	// Method 2: PTRACE_TRACEME — fails if already being traced
+	_, _, errno := syscall.RawSyscall(syscall.SYS_PTRACE, 0, 0, 0)
+	if errno != 0 {
+		return true
+	}
+
+	// Method 3: Timing — single-stepping causes measurable delay
+	start := time.Now()
+	sum := 0
+	for i := 0; i < 1000; i++ {
+		sum += i
+	}
+	_ = sum
+	if time.Since(start) > 50*time.Millisecond {
+		return true
+	}
+
+	return false
+}
+
 func main() {
 	if checkDebugger() {
-		hostLockConfigured := dnsServer != "" && allowedHostsEnc != ""
-		pathLockConfigured := allowedPathEnc != ""
-
-		anyLockConfigured := hostLockConfigured || pathLockConfigured
-		allLocksPassed := checkHostnameLock() && checkPathLock()
-
-		if anyLockConfigured && allLocksPassed {
-			os.Exit(1)
-		}
-		selfDestruct()
+		secureExit()
 	}
 
 	if !checkHostnameLock() || !checkPathLock() {
-		selfDestruct()
+		secureExit()
 	}
 
 	bindPW := xorDecode(bindPWEnc, obfKey)
-	if ldapServer == "" || bindDN == "" || userSearchBase == "" || groupSearchBase == "" || bindPW == "" {
+	if ldapServer == "" || bindDN == "" || userSearchBase == "" || groupSearchBase == "" || len(bindPW) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: binary was not built with required values.\n")
 		fmt.Fprintf(os.Stderr, "Use build.sh to create a properly configured binary.\n")
 		os.Exit(1)
@@ -258,7 +290,13 @@ func main() {
 	defer conn.Close()
 
 	// Bind with service account
-	err = conn.Bind(bindDN, bindPW)
+	err = conn.Bind(bindDN, string(bindPW))
+	// Zero the password buffer immediately after the bind call consumes it.
+	// The string(...) cast above creates a short-lived copy the LDAP library
+	// reads; the long-lived buffer we control is wiped here.
+	for i := range bindPW {
+		bindPW[i] = 0
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "LDAP bind failed: %v\n", err)
 		os.Exit(1)

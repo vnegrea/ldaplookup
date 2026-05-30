@@ -1,6 +1,6 @@
 # ldaplookup
 
-A hardened, self-contained LDAP lookup tool. Produces a statically linked binary with no runtime dependencies. Credentials are either sealed on the target machine (recommended) or embedded at build time — operators choose the mode per build.
+A hardened, self-contained LDAP lookup tool. Produces a statically linked binary with no runtime dependencies. Credentials are either sealed on the target machine (recommended) or embedded at build time - operators choose the mode per build.
 
 ## Features
 
@@ -81,7 +81,7 @@ The password is encrypted using a key derived from:
 **This means:**
 - The binary contains no extractable password
 - The `.seal` file is useless on any other machine, under any other user, or at any other path
-- Moving, copying, or upgrading the binary breaks decryption — re-run `--seal` after replacing the binary
+- Moving, copying, or upgrading the binary breaks decryption - re-run `--seal` after replacing the binary
 - Each user gets their own seal file (`<binary>.seal.<uid>`)
 
 **Credential rotation:**
@@ -91,10 +91,10 @@ The password is encrypted using a key derived from:
 
 **Choosing a mode (selected when you run `build.sh`):**
 
-| | Mode 1 — Sealed (recommended) | Mode 2 — Embedded (legacy) |
+| | Mode 1 - Sealed (recommended) | Mode 2 - Embedded (legacy) |
 |---|---|---|
 | Password location | Encrypted `.seal` on the target; never in the binary | XOR-obfuscated inside the binary |
-| Static-analysis resistance | High — key is bound to machine, user, path, and binary | Low — recoverable from the binary |
+| Static-analysis resistance | High - key is bound to machine, user, path, and binary | Low - recoverable from the binary |
 | Deployment | Requires running `--seal` once on the target | Single artifact, no post-deploy step |
 
 Both modes are built from the same source; you choose one per build.
@@ -167,7 +167,7 @@ You'll be prompted for:
 - LDAP server URL (e.g., `ldaps://ldap.umich.edu`)
 - User search base (e.g., `ou=People,dc=umich,dc=edu`)
 - Group search base (e.g., `ou=User Groups,ou=Groups,dc=umich,dc=edu`)
-- Bind DN (full Distinguished Name, e.g., `cn=App01,ou=Applications,o=services` — not just `cn=App01`)
+- Bind DN (full Distinguished Name, e.g., `cn=App01,ou=Applications,o=services` - not just `cn=App01`)
 - Bind password
 - Hostname lock (enabled by default)
 - Path lock (enabled by default)

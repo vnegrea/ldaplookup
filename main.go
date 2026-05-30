@@ -159,6 +159,13 @@ func sealCredentials() error {
 	if err != nil {
 		return fmt.Errorf("failed to read password: %w", err)
 	}
+	// Zero the plaintext password on every exit path once we hold it,
+	// mirroring the bind path. gcm.Seal copies the data; it does not wipe it.
+	defer func() {
+		for i := range password {
+			password[i] = 0
+		}
+	}()
 
 	if len(password) == 0 {
 		return fmt.Errorf("password cannot be empty")

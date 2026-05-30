@@ -225,8 +225,8 @@ else:
 " 2>&1)
 echo "$SEAL_OUTPUT"
 
-# Find the .seal file (named <binary_path>.seal)
-SEAL_FILE=$(readlink -f ./ldaplookup).seal
+# Find the .seal file (user-scoped: <binary_path>.seal.<uid>)
+SEAL_FILE=$(readlink -f ./ldaplookup).seal.$(id -u)
 if [[ -f "$SEAL_FILE" ]]; then
     echo "✅ Seal file created: $SEAL_FILE"
 else

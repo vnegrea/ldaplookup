@@ -87,8 +87,25 @@ func deriveKeyFromEnvironment() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot get executable path: %w", err)
 	}
-	exePath, _ = filepath.EvalSymlinks(exePath)
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve executable path: %w", err)
+	}
 	h.Write([]byte(filepath.Dir(exePath)))
+
+	// 4. Running user's UID. Binds the seal to a specific user so that
+	//    another local user who can read the binary and the world-readable
+	//    /etc/machine-id cannot derive the same key.
+	h.Write([]byte(strconv.Itoa(os.Getuid())))
+
+	// 5. Hash of this exact binary. Replacing or upgrading the binary in
+	//    place invalidates an existing seal, forcing a deliberate re-seal.
+	binaryData, err := os.ReadFile(exePath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read binary for hashing: %w", err)
+	}
+	binaryHash := sha256.Sum256(binaryData)
+	h.Write(binaryHash[:])
 
 	return h.Sum(nil), nil
 }
@@ -99,8 +116,14 @@ func getSealPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	exePath, _ = filepath.EvalSymlinks(exePath)
-	return exePath + ".seal", nil
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve executable path: %w", err)
+	}
+	// User-scoped seal: each UID gets its own file, so multiple users on one
+	// host can each seal their own credentials and one user's seal is not
+	// usable by another.
+	return fmt.Sprintf("%s.seal.%d", exePath, os.Getuid()), nil
 }
 
 // sealCredentials encrypts and stores the LDAP password
@@ -168,7 +191,8 @@ func sealCredentials() error {
 	}
 
 	fmt.Printf("Credentials sealed to %s\n", sealPath)
-	fmt.Println("This file is bound to this machine and deployment path.")
+	fmt.Println("This file is bound to this machine, user, deployment path, and binary version.")
+	fmt.Println("Re-run --seal after updating the binary.")
 	return nil
 }
 
@@ -211,7 +235,7 @@ func unsealPassword() ([]byte, error) {
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return nil, fmt.Errorf("unseal failed - wrong environment or tampered file")
+		return nil, fmt.Errorf("unseal failed - wrong machine/user/path, binary was updated, or tampered file; re-run --seal")
 	}
 
 	return plaintext, nil

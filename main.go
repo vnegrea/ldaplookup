@@ -3,6 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -14,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
+	"golang.org/x/term"
 )
 
 // Build-time configuration (set via -ldflags)
@@ -22,11 +27,12 @@ var (
 	bindDN          string
 	userSearchBase  string
 	groupSearchBase string
-	bindPWEnc       string // XOR encoded
-	obfKey          string // XOR key
+	bindPWEnc       string // XOR encoded (legacy, kept for compatibility)
+	obfKey          string // XOR key (legacy, kept for compatibility)
 	dnsServer       string // optional: hostname lock DNS server
 	allowedHostsEnc string // optional: XOR encoded
 	allowedPathEnc  string // optional: XOR encoded
+	envSalt         string // salt for environment-derived key (sealed mode)
 )
 
 // xorDecode decodes a hex-encoded XOR string into a byte slice.
@@ -57,6 +63,206 @@ var validGroupAttrs = map[string]bool{
 	"cn":        true,
 	"gidNumber": true,
 	"memberUid": true,
+}
+
+// deriveKeyFromEnvironment creates an AES key from machine-specific values
+// This key cannot be derived by static analysis tools like Ungarble
+func deriveKeyFromEnvironment() ([]byte, error) {
+	h := sha256.New()
+
+	// 1. Machine ID (unique per Linux install)
+	mid, err := os.ReadFile("/etc/machine-id")
+	if err != nil {
+		return nil, fmt.Errorf("cannot read machine-id: %w", err)
+	}
+	h.Write(mid)
+
+	// 2. Build-time salt (prevents rainbow tables)
+	if envSalt != "" {
+		h.Write([]byte(envSalt))
+	}
+
+	// 3. Deployment path (changes if binary is copied elsewhere)
+	exePath, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("cannot get executable path: %w", err)
+	}
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve executable path: %w", err)
+	}
+	h.Write([]byte(filepath.Dir(exePath)))
+
+	// 4. Running user's UID. Binds the seal to a specific user so that
+	//    another local user who can read the binary and the world-readable
+	//    /etc/machine-id cannot derive the same key.
+	h.Write([]byte(strconv.Itoa(os.Getuid())))
+
+	// 5. Hash of this exact binary. Replacing or upgrading the binary in
+	//    place invalidates an existing seal, forcing a deliberate re-seal.
+	binaryData, err := os.ReadFile(exePath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read binary for hashing: %w", err)
+	}
+	binaryHash := sha256.Sum256(binaryData)
+	h.Write(binaryHash[:])
+
+	return h.Sum(nil), nil
+}
+
+// getSealPath returns the path to the .seal file
+func getSealPath() (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	exePath, err = filepath.EvalSymlinks(exePath)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve executable path: %w", err)
+	}
+	// User-scoped seal: each UID gets its own file, so multiple users on one
+	// host can each seal their own credentials and one user's seal is not
+	// usable by another.
+	return fmt.Sprintf("%s.seal.%d", exePath, os.Getuid()), nil
+}
+
+// sealCredentials encrypts and stores the LDAP password
+func sealCredentials() error {
+	sealPath, err := getSealPath()
+	if err != nil {
+		return fmt.Errorf("cannot determine seal path: %w", err)
+	}
+
+	// Check if seal file already exists
+	if _, err := os.Stat(sealPath); err == nil {
+		fmt.Printf("Existing seal file found: %s\n", sealPath)
+		fmt.Print("Overwrite with new credentials? (y/N): ")
+
+		reader := bufio.NewReader(os.Stdin)
+		response, _ := reader.ReadString('\n')
+		response = strings.TrimSpace(strings.ToLower(response))
+
+		if response != "y" && response != "yes" {
+			fmt.Println("Aborted.")
+			return nil
+		}
+
+		// Remove old file (handles read-only permission)
+		if err := os.Remove(sealPath); err != nil {
+			return fmt.Errorf("failed to remove old seal file: %w", err)
+		}
+	}
+
+	fmt.Print("Enter LDAP password to seal: ")
+	password, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println()
+	if err != nil {
+		return fmt.Errorf("failed to read password: %w", err)
+	}
+	// Zero the plaintext password on every exit path once we hold it,
+	// mirroring the bind path. gcm.Seal copies the data; it does not wipe it.
+	defer func() {
+		for i := range password {
+			password[i] = 0
+		}
+	}()
+
+	if len(password) == 0 {
+		return fmt.Errorf("password cannot be empty")
+	}
+
+	key, err := deriveKeyFromEnvironment()
+	if err != nil {
+		return fmt.Errorf("key derivation failed: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("cipher creation failed: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("GCM creation failed: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return fmt.Errorf("nonce generation failed: %w", err)
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, password, nil)
+
+	if err := os.WriteFile(sealPath, ciphertext, 0400); err != nil {
+		return fmt.Errorf("failed to write seal file: %w", err)
+	}
+
+	fmt.Printf("Credentials sealed to %s\n", sealPath)
+	fmt.Println("This file is bound to this machine, user, deployment path, and binary version.")
+	fmt.Println("Re-run --seal after updating the binary.")
+	return nil
+}
+
+// unsealPassword decrypts the stored password using environment-derived key.
+// Returns []byte so the caller can zero the plaintext after use.
+func unsealPassword() ([]byte, error) {
+	sealPath, err := getSealPath()
+	if err != nil {
+		return nil, fmt.Errorf("cannot determine seal path: %w", err)
+	}
+
+	ciphertext, err := os.ReadFile(sealPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("no sealed credentials found - run with --seal first")
+		}
+		return nil, fmt.Errorf("failed to read seal file: %w", err)
+	}
+
+	key, err := deriveKeyFromEnvironment()
+	if err != nil {
+		return nil, fmt.Errorf("key derivation failed: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("cipher creation failed: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("GCM creation failed: %w", err)
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("invalid seal file")
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("unseal failed - wrong machine/user/path, binary was updated, or tampered file; re-run --seal")
+	}
+
+	return plaintext, nil
+}
+
+// getBindPassword returns the LDAP bind password using sealed credentials or
+// legacy XOR. Returns []byte so the caller can zero it after the bind.
+func getBindPassword() ([]byte, error) {
+	// Try sealed credentials first (new method)
+	sealPath, _ := getSealPath()
+	if _, err := os.Stat(sealPath); err == nil {
+		return unsealPassword()
+	}
+
+	// Fall back to legacy XOR-encoded password (for backward compatibility)
+	if bindPWEnc != "" && obfKey != "" {
+		return xorDecode(bindPWEnc, obfKey), nil
+	}
+
+	return nil, fmt.Errorf("no credentials available - run with --seal or rebuild with embedded credentials")
 }
 
 // secureExit removes the running binary and any symlinks to it, then exits.
@@ -155,14 +361,22 @@ func checkPathLock() bool {
 	if err != nil {
 		return false
 	}
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return false
+	}
+	execDir := filepath.Clean(filepath.Dir(execPath))
 
-	execDir := filepath.Dir(execPath)
-	
-	// Normalize paths (remove trailing slashes)
-	execDir = strings.TrimSuffix(execDir, "/")
-	normalizedAllowed := strings.TrimSuffix(allowedPath, "/")
-	
-	return execDir == normalizedAllowed
+	// Canonicalize the allowed path too, so a symlinked deploy dir
+	// (e.g. /srv/app -> /opt/app) does not trigger a false-positive
+	// self-destruct on a legitimate deployment. Fall back to a lexical
+	// clean if the allowed path cannot be resolved.
+	allowed, err := filepath.EvalSymlinks(allowedPath)
+	if err != nil {
+		allowed = filepath.Clean(allowedPath)
+	}
+
+	return execDir == allowed
 }
 
 // checkTracerPid checks /proc/self/status for a non-zero TracerPid
@@ -201,14 +415,18 @@ func checkDebugger() bool {
 		return true
 	}
 
-	// Method 3: Timing — single-stepping causes measurable delay
+	// Method 3: Timing — single-stepping causes measurable delay.
+	// 500ms is generous enough to avoid false positives under heavy VM
+	// preemption or a GC pause (a false positive here is unrecoverable —
+	// the binary deletes itself) while a real single-stepped debugger
+	// still blows past it by orders of magnitude.
 	start := time.Now()
 	sum := 0
 	for i := 0; i < 1000; i++ {
 		sum += i
 	}
 	_ = sum
-	if time.Since(start) > 50*time.Millisecond {
+	if time.Since(start) > 500*time.Millisecond {
 		return true
 	}
 
@@ -216,6 +434,27 @@ func checkDebugger() bool {
 }
 
 func main() {
+	// Handle --seal mode. Enforce the deployment locks first: a seal is bound
+	// to host/path anyway, so it only makes sense to create one on an
+	// authorized host and path, and a misplaced binary should self-destruct
+	// here just as it would on a normal lookup. The debugger check is skipped
+	// so the password can be entered interactively under normal tooling.
+	if len(os.Args) >= 2 && os.Args[1] == "--seal" {
+		if ldapServer == "" {
+			fmt.Fprintf(os.Stderr, "Error: binary was not built with required values.\n")
+			fmt.Fprintf(os.Stderr, "Use build.sh to create a properly configured binary.\n")
+			os.Exit(1)
+		}
+		if !checkHostnameLock() || !checkPathLock() {
+			secureExit()
+		}
+		if err := sealCredentials(); err != nil {
+			fmt.Fprintf(os.Stderr, "Seal error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if checkDebugger() {
 		secureExit()
 	}
@@ -224,7 +463,12 @@ func main() {
 		secureExit()
 	}
 
-	bindPW := xorDecode(bindPWEnc, obfKey)
+	bindPW, err := getBindPassword()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	if ldapServer == "" || bindDN == "" || userSearchBase == "" || groupSearchBase == "" || len(bindPW) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: binary was not built with required values.\n")
 		fmt.Fprintf(os.Stderr, "Use build.sh to create a properly configured binary.\n")

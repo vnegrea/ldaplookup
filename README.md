@@ -1,6 +1,6 @@
 # ldaplookup
 
-A hardened, self-contained LDAP lookup tool with embedded credentials. Produces a statically linked binary with no external dependencies.
+A hardened, self-contained LDAP lookup tool. Produces a statically linked binary with no runtime dependencies. Credentials are either sealed on the target machine (recommended) or embedded at build time — operators choose the mode per build.
 
 ## Features
 
@@ -50,6 +50,55 @@ The build uses flags from garble, Go's build system, the Go linker, and environm
 | `-buildid=` | go linker | Remove Go build ID to hinder version fingerprinting |
 | `GOGARBLE='*'` | env var | Obfuscate all packages including dependencies |
 
+### Sealed Credentials (Recommended)
+
+Sealed credentials protect against binary analysis by keeping the password **out of the binary entirely**.
+
+**How it works:**
+
+```
+┌─────────────┐        ┌─────────────┐        ┌─────────────┐
+│   BUILD     │        │   DEPLOY    │        │    SEAL     │
+│ No password │  ───►  │ Copy binary │  ───►  │  --seal     │
+│  embedded   │        │  to target  │        │ encrypts pw │
+└─────────────┘        └─────────────┘        └──────┬──────┘
+                                                     │
+                                                     ▼
+                                              ┌─────────────┐
+                                              │ .seal file  │
+                                              │ AES-256-GCM │
+                                              │machine-bound│
+                                              └─────────────┘
+```
+
+The password is encrypted using a key derived from:
+- The target machine's unique ID (`/etc/machine-id`)
+- A random salt generated at build time
+- The deployment directory path
+- The running user's UID
+- A SHA-256 hash of the binary itself
+
+**This means:**
+- The binary contains no extractable password
+- The `.seal` file is useless on any other machine, under any other user, or at any other path
+- Moving, copying, or upgrading the binary breaks decryption — re-run `--seal` after replacing the binary
+- Each user gets their own seal file (`<binary>.seal.<uid>`)
+
+**Credential rotation:**
+```bash
+./ldaplookup --seal    # Prompts to overwrite if .seal exists
+```
+
+**Choosing a mode (selected when you run `build.sh`):**
+
+| | Mode 1 — Sealed (recommended) | Mode 2 — Embedded (legacy) |
+|---|---|---|
+| Password location | Encrypted `.seal` on the target; never in the binary | XOR-obfuscated inside the binary |
+| Static-analysis resistance | High — key is bound to machine, user, path, and binary | Low — recoverable from the binary |
+| Deployment | Requires running `--seal` once on the target | Single artifact, no post-deploy step |
+
+Both modes are built from the same source; you choose one per build.
+
 ### Runtime Locks
 
 **Hostname lock:** Restricts execution to specific servers using DNS verification.
@@ -63,6 +112,8 @@ Using a DNS server you control is critical. It prevents attackers from spoofing 
 To check what your system will return, run: `hostname -f`
 
 You can provide multiple FQDNs (comma-separated) for systems with multiple hostnames: `server1.umich.edu,server2.umich.edu`
+
+**Known limitation:** The DNS step confirms that the *allowed FQDN resolves* via your trusted DNS server; it does not cryptographically prove that the local host's identity is that FQDN. Use it together with the path lock and OS-level access controls for defense in depth.
 
 **Path lock:** Restricts execution to a specific deployment directory.
 1. At build time, specify the allowed deployment path (e.g., `/opt/ldaplookup`)
@@ -81,6 +132,8 @@ Built-in tamper resistance protects against analysis and unauthorized use.
 | Hostname mismatch | Binary deletes itself | Unauthorized host |
 | Path mismatch | Binary deletes itself | Moved/copied illegally |
 | Debugger detected | Binary deletes itself | Analysis attempt |
+
+**Note:** Self-destruct is best-effort. Deletion can fail on read-only filesystems, immutable (`chattr +i`) files, hardlinked binaries, or where the running user lacks write access to the binary's directory. Treat the locks as a strong deterrent, not a hard guarantee.
 
 ### Best Practices
 - Use `chmod 110` and open up as needed
@@ -140,9 +193,15 @@ cp ldaplookup /path/to/destination/
 
 # Create the symlink for group lookups
 ln -s ldaplookup /path/to/destination/ldaplookupg
+
+# If using sealed credentials (default), seal on the target machine
+/path/to/destination/ldaplookup --seal
+# Enter the LDAP password when prompted
 ```
 
 The binary detects its invocation name. When called as `ldaplookupg`, it queries groups instead of users.
+
+**Note:** If you used legacy embedded credentials during build, the `--seal` step is not required.
 
 ### Obfuscation Seed
 
@@ -200,6 +259,6 @@ The seed is stored in `.garble_seed` (gitignored) and reused on subsequent build
 
 ## Requirements
 
-- Go 1.25.5+
+- Go 1.25.10+ (patch level matters — earlier 1.25.x have known crypto/tls and crypto/x509 advisories)
 - [garble](https://github.com/burrowers/garble): `go install mvdan.cc/garble@latest`
 - openssl (for seed generation)

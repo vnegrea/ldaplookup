@@ -354,14 +354,22 @@ func checkPathLock() bool {
 	if err != nil {
 		return false
 	}
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return false
+	}
+	execDir := filepath.Clean(filepath.Dir(execPath))
 
-	execDir := filepath.Dir(execPath)
+	// Canonicalize the allowed path too, so a symlinked deploy dir
+	// (e.g. /srv/app -> /opt/app) does not trigger a false-positive
+	// self-destruct on a legitimate deployment. Fall back to a lexical
+	// clean if the allowed path cannot be resolved.
+	allowed, err := filepath.EvalSymlinks(allowedPath)
+	if err != nil {
+		allowed = filepath.Clean(allowedPath)
+	}
 
-	// Normalize paths (remove trailing slashes)
-	execDir = strings.TrimSuffix(execDir, "/")
-	normalizedAllowed := strings.TrimSuffix(allowedPath, "/")
-
-	return execDir == normalizedAllowed
+	return execDir == allowed
 }
 
 // checkTracerPid checks /proc/self/status for a non-zero TracerPid
@@ -400,14 +408,18 @@ func checkDebugger() bool {
 		return true
 	}
 
-	// Method 3: Timing — single-stepping causes measurable delay
+	// Method 3: Timing — single-stepping causes measurable delay.
+	// 500ms is generous enough to avoid false positives under heavy VM
+	// preemption or a GC pause (a false positive here is unrecoverable —
+	// the binary deletes itself) while a real single-stepped debugger
+	// still blows past it by orders of magnitude.
 	start := time.Now()
 	sum := 0
 	for i := 0; i < 1000; i++ {
 		sum += i
 	}
 	_ = sum
-	if time.Since(start) > 50*time.Millisecond {
+	if time.Since(start) > 500*time.Millisecond {
 		return true
 	}
 

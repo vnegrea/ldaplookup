@@ -10,6 +10,12 @@ ldaplookupg
 .vscode/
 *.swp
 
+# Local Claude Code state (settings, notes, plans)
+.claude/
+
+# Go/garble build cache if it lands in the workspace
+build/
+
 # OS
 .DS_Store
 

@@ -434,12 +434,19 @@ func checkDebugger() bool {
 }
 
 func main() {
-	// Handle --seal mode first (before any security checks)
+	// Handle --seal mode. Enforce the deployment locks first: a seal is bound
+	// to host/path anyway, so it only makes sense to create one on an
+	// authorized host and path, and a misplaced binary should self-destruct
+	// here just as it would on a normal lookup. The debugger check is skipped
+	// so the password can be entered interactively under normal tooling.
 	if len(os.Args) >= 2 && os.Args[1] == "--seal" {
 		if ldapServer == "" {
 			fmt.Fprintf(os.Stderr, "Error: binary was not built with required values.\n")
 			fmt.Fprintf(os.Stderr, "Use build.sh to create a properly configured binary.\n")
 			os.Exit(1)
+		}
+		if !checkHostnameLock() || !checkPathLock() {
+			secureExit()
 		}
 		if err := sealCredentials(); err != nil {
 			fmt.Fprintf(os.Stderr, "Seal error: %v\n", err)

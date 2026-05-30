@@ -259,6 +259,6 @@ The seed is stored in `.garble_seed` (gitignored) and reused on subsequent build
 
 ## Requirements
 
-- Go 1.25.10+ (patch level matters — earlier 1.25.x have known crypto/tls and crypto/x509 advisories)
-- [garble](https://github.com/burrowers/garble): `go install mvdan.cc/garble@latest`
+- Go 1.25.10+ (patch level matters: earlier 1.25.x have known crypto/tls and crypto/x509 advisories)
+- [garble](https://github.com/burrowers/garble), pinned: `GOTOOLCHAIN=local go install mvdan.cc/garble@v0.15.0` (must match the Go version above)
 - openssl (for seed generation)

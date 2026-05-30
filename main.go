@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,13 +32,15 @@ var (
 	dnsServer       string // optional: hostname lock DNS server
 	allowedHostsEnc string // optional: XOR encoded
 	allowedPathEnc  string // optional: XOR encoded
-	envSalt         string // salt for environment-derived key
+	envSalt         string // salt for environment-derived key (sealed mode)
 )
 
-// xorDecode decodes a hex-encoded XOR string
-func xorDecode(hexStr, key string) string {
+// xorDecode decodes a hex-encoded XOR string into a byte slice.
+// Returning []byte (instead of string) lets the password call site zero
+// the buffer after use; config callers convert back with string(...).
+func xorDecode(hexStr, key string) []byte {
 	if hexStr == "" || key == "" {
-		return ""
+		return nil
 	}
 	result := make([]byte, len(hexStr)/2)
 	for i := 0; i < len(hexStr); i += 2 {
@@ -47,7 +48,7 @@ func xorDecode(hexStr, key string) string {
 		fmt.Sscanf(hexStr[i:i+2], "%02x", &b)
 		result[i/2] = b ^ key[i/2%len(key)]
 	}
-	return string(result)
+	return result
 }
 
 var validUserAttrs = map[string]bool{
@@ -171,52 +172,54 @@ func sealCredentials() error {
 	return nil
 }
 
-// unsealPassword decrypts the stored password using environment-derived key
-func unsealPassword() (string, error) {
+// unsealPassword decrypts the stored password using environment-derived key.
+// Returns []byte so the caller can zero the plaintext after use.
+func unsealPassword() ([]byte, error) {
 	sealPath, err := getSealPath()
 	if err != nil {
-		return "", fmt.Errorf("cannot determine seal path: %w", err)
+		return nil, fmt.Errorf("cannot determine seal path: %w", err)
 	}
 
 	ciphertext, err := os.ReadFile(sealPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("no sealed credentials found - run with --seal first")
+			return nil, fmt.Errorf("no sealed credentials found - run with --seal first")
 		}
-		return "", fmt.Errorf("failed to read seal file: %w", err)
+		return nil, fmt.Errorf("failed to read seal file: %w", err)
 	}
 
 	key, err := deriveKeyFromEnvironment()
 	if err != nil {
-		return "", fmt.Errorf("key derivation failed: %w", err)
+		return nil, fmt.Errorf("key derivation failed: %w", err)
 	}
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return "", fmt.Errorf("cipher creation failed: %w", err)
+		return nil, fmt.Errorf("cipher creation failed: %w", err)
 	}
 
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("GCM creation failed: %w", err)
+		return nil, fmt.Errorf("GCM creation failed: %w", err)
 	}
 
 	nonceSize := gcm.NonceSize()
 	if len(ciphertext) < nonceSize {
-		return "", fmt.Errorf("invalid seal file")
+		return nil, fmt.Errorf("invalid seal file")
 	}
 
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		return "", fmt.Errorf("unseal failed - wrong environment or tampered file")
+		return nil, fmt.Errorf("unseal failed - wrong environment or tampered file")
 	}
 
-	return string(plaintext), nil
+	return plaintext, nil
 }
 
-// getBindPassword returns the LDAP bind password using sealed credentials or legacy XOR
-func getBindPassword() (string, error) {
+// getBindPassword returns the LDAP bind password using sealed credentials or
+// legacy XOR. Returns []byte so the caller can zero it after the bind.
+func getBindPassword() ([]byte, error) {
 	// Try sealed credentials first (new method)
 	sealPath, _ := getSealPath()
 	if _, err := os.Stat(sealPath); err == nil {
@@ -228,10 +231,13 @@ func getBindPassword() (string, error) {
 		return xorDecode(bindPWEnc, obfKey), nil
 	}
 
-	return "", fmt.Errorf("no credentials available - run with --seal or rebuild with embedded credentials")
+	return nil, fmt.Errorf("no credentials available - run with --seal or rebuild with embedded credentials")
 }
 
 // secureExit removes the running binary and any symlinks to it, then exits.
+// Resolves the actual executable path (via EvalSymlinks) instead of relying
+// on hardcoded filenames, and only deletes symlinks in the same directory
+// whose target is this binary.
 func secureExit() {
 	execPath, err := os.Executable()
 	if err == nil {
@@ -255,33 +261,30 @@ func secureExit() {
 	os.Exit(1)
 }
 
-// getHostnameFQDN returns the fully qualified domain name
+// getHostnameFQDN returns the fully qualified domain name using stdlib only.
+// Avoids shelling to hostname/hostnamectl, which would expose us to PATH
+// hijacking on hosts where $PATH is attacker-controlled.
 func getHostnameFQDN() string {
-	// Try hostname -f first
-	if out, err := exec.Command("hostname", "-f").Output(); err == nil {
-		fqdn := strings.TrimSpace(string(out))
-		// If not localhost, use it
-		if fqdn != "" && !strings.HasPrefix(fqdn, "localhost") {
-			return fqdn
-		}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
 	}
 
-	// Try transient hostname (RHEL/systemd)
-	if out, err := exec.Command("hostnamectl", "--transient").Output(); err == nil {
-		transient := strings.TrimSpace(string(out))
-		if transient != "" {
-			return transient
+	// Forward+reverse DNS to promote a short name to an FQDN
+	if addrs, err := net.LookupHost(hostname); err == nil && len(addrs) > 0 {
+		if names, err := net.LookupAddr(addrs[0]); err == nil && len(names) > 0 {
+			fqdn := strings.TrimSuffix(names[0], ".")
+			if fqdn != "" && !strings.HasPrefix(fqdn, "localhost") {
+				return fqdn
+			}
 		}
 	}
-
-	// Fallback to os.Hostname
-	hostname, _ := os.Hostname()
 	return hostname
 }
 
 // checkHostnameLock validates hostname against allowed list and DNS
 func checkHostnameLock() bool {
-	allowedHosts := xorDecode(allowedHostsEnc, obfKey)
+	allowedHosts := string(xorDecode(allowedHostsEnc, obfKey))
 	if dnsServer == "" || allowedHosts == "" {
 		return true
 	}
@@ -318,7 +321,7 @@ func checkHostnameLock() bool {
 
 // checkPathLock validates binary is running from allowed directory
 func checkPathLock() bool {
-	allowedPath := xorDecode(allowedPathEnc, obfKey)
+	allowedPath := string(xorDecode(allowedPathEnc, obfKey))
 	if allowedPath == "" {
 		return true
 	}
@@ -329,11 +332,11 @@ func checkPathLock() bool {
 	}
 
 	execDir := filepath.Dir(execPath)
-	
+
 	// Normalize paths (remove trailing slashes)
 	execDir = strings.TrimSuffix(execDir, "/")
 	normalizedAllowed := strings.TrimSuffix(allowedPath, "/")
-	
+
 	return execDir == normalizedAllowed
 }
 
@@ -416,7 +419,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if ldapServer == "" || bindDN == "" || userSearchBase == "" || groupSearchBase == "" || bindPW == "" {
+	if ldapServer == "" || bindDN == "" || userSearchBase == "" || groupSearchBase == "" || len(bindPW) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: binary was not built with required values.\n")
 		fmt.Fprintf(os.Stderr, "Use build.sh to create a properly configured binary.\n")
 		os.Exit(1)
@@ -481,7 +484,13 @@ func main() {
 	defer conn.Close()
 
 	// Bind with service account
-	err = conn.Bind(bindDN, bindPW)
+	err = conn.Bind(bindDN, string(bindPW))
+	// Zero the password buffer immediately after the bind call consumes it.
+	// The string(...) cast above creates a short-lived copy the LDAP library
+	// reads; the long-lived buffer we control is wiped here.
+	for i := range bindPW {
+		bindPW[i] = 0
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "LDAP bind failed: %v\n", err)
 		os.Exit(1)

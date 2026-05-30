@@ -114,7 +114,7 @@ You'll be prompted for:
 - LDAP server URL (e.g., `ldaps://ldap.umich.edu`)
 - User search base (e.g., `ou=People,dc=umich,dc=edu`)
 - Group search base (e.g., `ou=User Groups,ou=Groups,dc=umich,dc=edu`)
-- Bind DN (full Distinguished Name, e.g., `cn=App01,ou=Applications,o=services` — not just `cn=App01`)
+- Bind DN (full Distinguished Name, e.g., `cn=App01,ou=Applications,o=services` - not just `cn=App01`)
 - Bind password
 - Hostname lock (enabled by default)
 - Path lock (enabled by default)

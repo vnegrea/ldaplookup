@@ -3,7 +3,7 @@
 
 set -e
 
-GO_VERSION="1.25.5"
+GO_VERSION="1.25.10"
 GO_HOME="$HOME/myGo"
 GO_TARBALL="/tmp/go${GO_VERSION}.linux-amd64.tar.gz"
 
@@ -22,11 +22,14 @@ echo 'if [[ ":$PATH:" != *":$HOME/myGo/go-sdk/bin:"* ]]; then' >> "$GO_HOME/env.
 echo '    export PATH="$GOROOT/bin:$GOPATH/bin:$PATH"' >> "$GO_HOME/env.sh"
 echo 'fi' >> "$GO_HOME/env.sh"
 
-# Install garble using the new paths
+# Install garble using the new paths. Pin to a version compatible with the Go
+# line above and build it with that exact toolchain: garble@latest pulls a
+# build that requires a newer Go, and a garble built against a different Go
+# refuses to run ("built with goX, can't be used with goY").
 export GOROOT="$GO_HOME/go-sdk"
 export GOPATH="$GO_HOME/go"
 export PATH="$GOROOT/bin:$GOPATH/bin:$PATH"
-go install mvdan.cc/garble@latest
+GOTOOLCHAIN=local go install mvdan.cc/garble@v0.15.0
 
 echo ""
 echo "=== Installation complete ==="

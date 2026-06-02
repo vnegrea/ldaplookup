@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
@@ -187,21 +186,20 @@ func checkTracerPid() bool {
 	return false
 }
 
-// checkDebugger uses multiple heuristics to detect debugging.
-// These are defense-in-depth speed bumps, not cryptographic guarantees.
+// checkDebugger uses heuristics to detect debugging. These are defense-in-depth
+// speed bumps, not cryptographic guarantees. PTRACE_TRACEME is deliberately NOT
+// used: a successful TRACEME call permanently marks the process as traced by
+// its parent, and the next runtime-delivered signal (SIGURG for goroutine
+// preemption, GC signals, etc.) halts the process in signal-delivery-stop with
+// no tracer to release it. The TracerPid check below catches the realistic
+// threat (gdb, strace, lldb, ltrace, perf trace) without that side effect.
 func checkDebugger() bool {
-	// Method 1: TracerPid — catches ptrace-based debuggers (gdb, strace)
+	// Method 1: TracerPid - catches ptrace-based debuggers (gdb, strace)
 	if checkTracerPid() {
 		return true
 	}
 
-	// Method 2: PTRACE_TRACEME — fails if already being traced
-	_, _, errno := syscall.RawSyscall(syscall.SYS_PTRACE, 0, 0, 0)
-	if errno != 0 {
-		return true
-	}
-
-	// Method 3: Timing — single-stepping causes measurable delay
+	// Method 2: Timing - single-stepping causes measurable delay
 	start := time.Now()
 	sum := 0
 	for i := 0; i < 1000; i++ {
